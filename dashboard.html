@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Rover IoT Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  body { background: linear-gradient(135deg, #0f0f16, #1a1a2e); color: #fff; font-family: 'Segoe UI', sans-serif; display:flex; flex-direction:column; align-items:center; padding:20px; }
+  h1 { color: #0ff; text-shadow: 0 0 10px #0ff; }
+  .legend { margin-bottom: 15px; font-size: 16px; }
+  .legend span { margin-right: 15px; }
+  .cards-container { display:flex; gap:20px; flex-wrap:wrap; justify-content:center; margin-bottom:30px; }
+  .card { background: rgba(20,20,40,0.9); border-radius:16px; box-shadow:0 0 20px #0ff; padding:25px; width:280px; text-align:center; transition:0.3s; }
+  .card:hover { box-shadow:0 0 40px #0ff; transform:scale(1.05); }
+  .card h2 { color:#0ff; text-shadow:0 0 5px #0ff; }
+  .sensor-toggle { display:flex; justify-content:center; margin:10px 0; }
+  .sensor-toggle label { display:flex; align-items:center; gap:10px; cursor:pointer; color:#0ff; }
+  .sensor-toggle input[type="checkbox"] { width:40px; height:20px; appearance:none; background:#222; border-radius:10px; position:relative; outline:none; transition:0.3s; }
+  .sensor-toggle input[type="checkbox"]:checked { background:#0ff; }
+  .sensor-toggle input[type="checkbox"]::before { content:''; position:absolute; width:18px; height:18px; background:#fff; border-radius:50%; top:1px; left:1px; transition:0.3s; }
+  .sensor-toggle input[type="checkbox"]:checked::before { transform:translateX(20px); background:#000; }
+  #charts-container { display:flex; gap:30px; flex-wrap:wrap; justify-content:center; }
+  canvas { background: rgba(20,20,40,0.8); border-radius:12px; padding:15px; box-shadow:0 0 20px #0ff; }
+  table { margin-top:20px; border-collapse:collapse; color:#0ff; font-size:14px; width:100%; }
+  table, th, td { border:1px solid #0ff; padding:8px 12px; }
+  th { background: rgba(0,255,255,0.1); }
+</style>
+</head>
+<body>
+
+<h1>Rover IoT Dashboard</h1>
+<div class="legend">
+  <span style="color:#0f0;">Green = Normal</span>
+  <span style="color:#f00;">Red = Out of Range</span>
+</div>
+
+<div class="cards-container">
+  <div class="card">
+    <h2>Ultrasonic Distance (cm)</h2>
+    <p id="ultrasonic">--</p>
+    <div class="sensor-toggle">
+      <label><input type="checkbox" id="toggleUltrasonic" checked> Sensor ON/OFF</label>
+    </div>
+    <table id="ultrasonicTable"><tr><th>Time</th><th>Distance (cm)</th></tr></table>
+  </div>
+
+  <div class="card">
+    <h2>Soil Moisture</h2>
+    <p id="soil">--</p>
+    <div class="sensor-toggle">
+      <label><input type="checkbox" id="toggleSoil" checked> Sensor ON/OFF</label>
+    </div>
+    <table id="soilTable"><tr><th>Time</th><th>Soil Moisture</th></tr></table>
+  </div>
+
+  <div class="card">
+    <h2>Gas Sensor (MQ-135)</h2>
+    <p id="gas">--</p>
+    <div class="sensor-toggle">
+      <label><input type="checkbox" id="toggleGas" checked> Sensor ON/OFF</label>
+    </div>
+    <table id="gasTable"><tr><th>Time</th><th>Gas Value</th></tr></table>
+  </div>
+
+  <div class="card">
+    <h2>Temperature & Humidity</h2>
+    <p id="temp">-- °C / -- %</p>
+    <div class="sensor-toggle">
+      <label><input type="checkbox" id="toggleTemp" checked> Sensor ON/OFF</label>
+    </div>
+    <table id="tempTable"><tr><th>Time</th><th>Temp (°C)</th><th>Humidity (%)</th></tr></table>
+  </div>
+</div>
+
+<div id="charts-container">
+  <canvas id="ultrasonicChart" width="400" height="200"></canvas>
+  <canvas id="soilChart" width="400" height="200"></canvas>
+  <canvas id="gasChart" width="400" height="200"></canvas>
+  <canvas id="tempChart" width="400" height="200"></canvas>
+</div>
+
+<script>
+const channelID = 3242443; // ThingSpeak channel
+const readAPIKey = "FYC6VEXZR1EEVI3B"; // optional if private channel
+
+// Toggles
+let ultrasonicEnabled=true, soilEnabled=true, gasEnabled=true, tempEnabled=true;
+document.getElementById('toggleUltrasonic').addEventListener('change', e=>ultrasonicEnabled=e.target.checked);
+document.getElementById('toggleSoil').addEventListener('change', e=>soilEnabled=e.target.checked);
+document.getElementById('toggleGas').addEventListener('change', e=>gasEnabled=e.target.checked);
+document.getElementById('toggleTemp').addEventListener('change', e=>tempEnabled=e.target.checked);
+
+// Data objects
+const ultrasonicData={labels:[],data:[]};
+const soilData={labels:[],data:[]};
+const gasData={labels:[],data:[]};
+const tempData={labels:[],temp:[],humidity:[]};
+
+// Normal ranges
+const ranges = {
+  ultrasonic: {min:100,max:1000},
+  soil: {min:0,max:700},
+  gas: {min:0,max:200},
+  temp: {min:0,max:50},
+  humidity: {min:0,max:100}
+};
+
+// Chart creation function
+function createChart(ctx, dataObj, label, color, range, isTemp=false){
+  return new Chart(ctx,{
+    type:'line',
+    data:{
+      labels:dataObj.labels,
+      datasets:[{
+        label: label,
+        data: isTemp ? dataObj.temp : dataObj.data,
+        borderColor: color,
+        backgroundColor:'rgba(0,255,255,0.1)',
+        fill:true,
+        tension:0.3,
+        segment:{
+          borderColor: ctx => {
+            const prev = isTemp ? ctx.p0.parsed.y : ctx.p0.parsed.y;
+            const next = isTemp ? ctx.p1.parsed.y : ctx.p1.parsed.y;
+            return (prev<range.min || prev>range.max || next<range.min || next>range.max) ? 'red' : color;
+          }
+        }
+      }]
+    },
+    options:{
+      scales:{y:{beginAtZero:true, max: isTemp ? 50 : 1000}},
+      plugins:{legend:{display:false}}
+    }
+  });
+}
+
+// Create charts
+const ultrasonicChart = createChart(document.getElementById('ultrasonicChart').getContext('2d'), ultrasonicData,'Distance','#0f0',ranges.ultrasonic);
+const soilChart = createChart(document.getElementById('soilChart').getContext('2d'), soilData,'Soil Moisture','#0ff',ranges.soil);
+const gasChart = createChart(document.getElementById('gasChart').getContext('2d'), gasData,'Gas','#ff0',ranges.gas);
+const tempChart = createChart(document.getElementById('tempChart').getContext('2d'), tempData,'Temp','#0ff',ranges.temp,true);
+
+// Fetch data from ThingSpeak
+async function fetchData() {
+  try {
+    const response = await fetch(`https://api.thingspeak.com/channels/${channelID}/feeds.json?results=20&api_key=${readAPIKey}`);
+    const json = await response.json();
+    const feeds = json.feeds;
+
+    feeds.forEach(feed => {
+      const time = new Date(feed.created_at).toLocaleTimeString();
+
+      // Ultrasonic
+      if(feed.field1 && ultrasonicEnabled){
+        const val = parseFloat(feed.field1);
+        document.getElementById('ultrasonic').innerText = val;
+        ultrasonicData.labels.push(time); ultrasonicData.data.push(val);
+        if(ultrasonicData.labels.length>20){ultrasonicData.labels.shift(); ultrasonicData.data.shift();}
+        ultrasonicChart.update();
+        const table=document.getElementById('ultrasonicTable'); const row=table.insertRow(-1);
+        row.insertCell(0).innerText=time; row.insertCell(1).innerText=val;
+        if(table.rows.length>21)table.deleteRow(1);
+      }
+
+      // Soil
+      if(feed.field2 && soilEnabled){
+        const val = parseFloat(feed.field2);
+        document.getElementById('soil').innerText = val;
+        soilData.labels.push(time); soilData.data.push(val);
+        if(soilData.labels.length>20){soilData.labels.shift(); soilData.data.shift();}
+        soilChart.update();
+        const table=document.getElementById('soilTable'); const row=table.insertRow(-1);
+        row.insertCell(0).innerText=time; row.insertCell(1).innerText=val;
+        if(table.rows.length>21)table.deleteRow(1);
+      }
+
+      // Gas
+      if(feed.field3 && gasEnabled){
+        const val = parseFloat(feed.field3);
+        document.getElementById('gas').innerText = val;
+        gasData.labels.push(time); gasData.data.push(val);
+        if(gasData.labels.length>20){gasData.labels.shift(); gasData.data.shift();}
+        gasChart.update();
+        const table=document.getElementById('gasTable'); const row=table.insertRow(-1);
+        row.insertCell(0).innerText=time; row.insertCell(1).innerText=val;
+        if(table.rows.length>21)table.deleteRow(1);
+      }
+
+      // Temperature & Humidity
+      if((feed.field4 || feed.field5) && tempEnabled){
+        const t = parseFloat(feed.field4) || 0;
+        const h = parseFloat(feed.field5) || 0;
+        document.getElementById('temp').innerText = `${t} °C / ${h} %`;
+        tempData.labels.push(time); tempData.temp.push(t); tempData.humidity.push(h);
+        if(tempData.labels.length>20){tempData.labels.shift(); tempData.temp.shift(); tempData.humidity.shift();}
+        tempChart.update();
+        const table=document.getElementById('tempTable'); const row=table.insertRow(-1);
+        row.insertCell(0).innerText=time; row.insertCell(1).innerText=t; row.insertCell(2).innerText=h;
+        if(table.rows.length>21)table.deleteRow(1);
+      }
+
+    });
+  } catch(e){
+    console.error("Error fetching ThingSpeak data:", e);
+  }
+}
+
+// Refresh data every 15s (matches free-tier)
+fetchData();
+setInterval(fetchData, 15000);
+</script>
+</body>
+</html>
